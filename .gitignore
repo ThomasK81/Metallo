@@ -1,3 +1,9 @@
+# Windows and Mac OS X
+Thumbs.db
+.DS_Store
+.RData
+.RHistory
+
 # Binaries for programs and plugins
 *.exe
 *.dll
