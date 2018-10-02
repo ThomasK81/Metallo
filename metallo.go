@@ -22,7 +22,8 @@ type theta struct {
 	Vector []float64
 }
 
-var templates = template.Must(template.ParseFiles("tmpl/view.html"))
+var templates = template.Must(template.ParseFiles("tmpl/view.html", "tmpl/index.html"))
+
 var testset, topics = readTheta("theta.csv")
 var significant = setSignificance()
 
@@ -87,9 +88,23 @@ func main() {
 	router.PathPrefix("/theta/").Handler(theta)
 	// router.HandleFunc("/load/{theta}", LoadDB)
 	router.HandleFunc("/view/{urn}/{count}", ViewPage)
+	router.HandleFunc("/view/{urn}/{count}/json", ViewPageJs)
 	router.HandleFunc("/topic/{topic}/{count}", ViewTopic)
+	router.HandleFunc("/", Index)
 	log.Println("Listening at" + port + "...")
 	log.Fatal(http.ListenAndServe(port, router))
+}
+
+// a function to enable CORS on a particular requestion
+func enableCors(w *http.ResponseWriter) {
+	(*w).Header().Set("Access-Control-Allow-Origin", "*")
+}
+
+func Index(w http.ResponseWriter, r *http.Request) {
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	fmt.Fprintln(w, string("Index Page"))
+
 }
 
 func ViewPage(w http.ResponseWriter, r *http.Request) {
@@ -103,6 +118,27 @@ func ViewPage(w http.ResponseWriter, r *http.Request) {
 
 	p, _ := loadPage(info, port)
 	renderTemplate(w, "view", p)
+}
+
+func ViewPageJs(w http.ResponseWriter, r *http.Request) {
+	enableCors(&w)
+
+	vars := mux.Vars(r)
+	urn := vars["urn"]
+	count := vars["count"]
+
+	info := Info{
+		URN:   urn,
+		Count: count}
+
+	p, errorResponse := JsonResponse(info)
+	if errorResponse != nil {
+		fmt.Fprintln(w, string("error"))
+	}
+
+	resultJSON, _ := json.Marshal(p)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	fmt.Fprintln(w, string(resultJSON))
 }
 
 func ViewTopic(w http.ResponseWriter, r *http.Request) {
@@ -268,6 +304,50 @@ func createNetwork(resultNetwork Network) {
 	return
 }
 
+func JsonResponse(info Info) (PassageJsonResponse, error) {
+
+	urn := info.URN
+	position := findURN(urn)
+	rank := info.Count
+	number, err := strconv.Atoi(rank)
+	check(err)
+	number = number + 1
+	text := ""
+
+	result := testmanhattan(testset[position], testset)
+	sorted_result := sortresults(result, number)
+
+	var texts []string
+	var ids []string
+	var manhattans []string
+
+	for i := range sorted_result {
+		index := floatfind(result, sorted_result[i])
+		switch {
+		case i == 0:
+			mandist := "0"
+			texts = append(texts, testset[index].Text)
+			ids = append(ids, testset[index].ID)
+			manhattans = append(manhattans, mandist)
+			text = testset[index].Text
+		case i > 0:
+			mannormed := sorted_result[i] * 100
+			mandist := strconv.FormatFloat(mannormed, 'f', 2, 64)
+			texts = append(texts, testset[index].Text)
+			ids = append(ids, testset[index].ID)
+			manhattans = append(manhattans, mandist)
+		}
+	}
+
+	relatedItems := []relatedItem{}
+	for i := range texts {
+		relatedItems = append(relatedItems, relatedItem{Id: ids[i], Distance: manhattans[i]})
+	}
+
+	passageObject := PassageJsonResponse{URN: "test", Text: text, Items: relatedItems}
+	return passageObject, nil
+}
+
 type Network struct {
 	Nodes []Node `json:"nodes"`
 	Edges []Edge `json:"edges"`
@@ -370,4 +450,14 @@ func floatfind(slice []float64, value float64) int {
 		}
 	}
 	return -1
+}
+
+type PassageJsonResponse struct {
+	URN   string        `json:"urn"`
+	Text  string        `json:"text"`
+	Items []relatedItem `json:"items"`
+}
+type relatedItem struct {
+	Id       string `json:"id"`
+	Distance string `json:"distance"`
 }
