@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/csv"
+	"encoding/gob"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
+	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -12,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/boltdb/bolt"
 	"github.com/gorilla/mux"
 )
 
@@ -32,48 +39,146 @@ type serverConfig struct {
 var templates = template.Must(template.ParseFiles("tmpl/view.html", "tmpl/index.html"))
 
 var confvar = loadConfiguration("./config.json")
-var testset, topics = readTheta()
+var topics = readTheta()
 var significant = confvar.Significance
 var port = confvar.Port
+var host = confvar.Host
+var address = host + port
+var pwd, _ = os.Getwd()
+var dbname = pwd + "/metallo.db"
 
-func readTheta() ([]theta, []string) {
+func gobEncode(p interface{}) ([]byte, error) {
+	buf := new(bytes.Buffer)
+	enc := gob.NewEncoder(buf)
+	err := enc.Encode(p)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func gobDecode(data []byte) (theta, error) {
+	var p *theta
+	buf := bytes.NewBuffer(data)
+	dec := gob.NewDecoder(buf)
+	err := dec.Decode(&p)
+	if err != nil {
+		return theta{}, err
+	}
+	return *p, nil
+}
+
+func thetaToDB(thetafile theta) error {
+	dbkey := []byte(thetafile.ID)
+	dbvalue, err := gobEncode(&thetafile)
+
+	db, err := bolt.Open(dbname, 0644, nil)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	err = db.Update(func(tx *bolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte("theta"))
+		if err != nil {
+			return err
+		}
+		val := bucket.Get(dbkey)
+		if val != nil {
+			return errors.New("work exists already")
+		}
+		err = bucket.Put(dbkey, dbvalue)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func readTheta() []string {
+	err := os.Remove(dbname)
+	check(err)
 	file := confvar.Source
 	fmt.Println("Reading file.")
 	var topics []string
-	f, err := os.Open(file)
-	if err != nil {
-		fmt.Println("could not open file")
-	}
-	defer f.Close()
-	reader := csv.NewReader(f)
-	reader.LazyQuotes = true
-	lines, err := reader.ReadAll()
-	if err != nil {
-		log.Fatalf("error reading all lines: %v", err)
-	}
-	var result []theta
-	for i, line := range lines {
-		if i == 0 {
-			for i := range line {
-				if i < 3 {
-					continue
+	switch confvar.Local {
+	case false:
+		fmt.Println("Fetching external resource.")
+		data, _ := getContent(file)
+		str := string(data)
+		reader := csv.NewReader(strings.NewReader(str))
+		reader.LazyQuotes = true
+		lines, err := reader.ReadAll()
+		if err != nil {
+			log.Fatalf("error reading all lines: %v", err)
+		}
+
+		for i, line := range lines {
+			if i == 0 {
+				for i := range line {
+					if i < 3 {
+						continue
+					}
+					topics = append(topics, line[i])
 				}
-				topics = append(topics, line[i])
+				continue
 			}
-			continue
+			identifier := line[1]
+			text := line[2]
+			vector := []float64{}
+			for i := range line[3:len(line)] {
+				index := i + 3
+				floatvalue, _ := strconv.ParseFloat(line[index], 64)
+				vector = append(vector, floatvalue)
+			}
+			thetaToDB(theta{ID: identifier, Text: text, Vector: vector})
 		}
-		identifier := line[1]
-		text := line[2]
-		vector := []float64{}
-		for i := range line[3:len(line)] {
-			index := i + 3
-			floatvalue, _ := strconv.ParseFloat(line[index], 64)
-			vector = append(vector, floatvalue)
+		fmt.Println("All is read.")
+	case true:
+		fmt.Println("Fetching internal resource.")
+		f, err := os.Open(file)
+		if err != nil {
+			fmt.Println("could not open file")
 		}
-		result = append(result, theta{ID: identifier, Text: text, Vector: vector})
+		defer f.Close()
+		reader := csv.NewReader(bufio.NewReader(f))
+		reader.LazyQuotes = true
+
+		linecount := 0
+		recordcount := 0
+		for {
+			record, err := reader.Read()
+			if err == io.EOF {
+				break
+			}
+			if linecount == 0 {
+				for j := range record {
+					if j < 3 {
+						continue
+					}
+					topics = append(topics, record[j])
+				}
+				linecount++
+				continue
+			}
+			identifier := record[1]
+			text := record[2]
+			vector := []float64{}
+			for j := range record[3:len(record)] {
+				index := j + 3
+				floatvalue, _ := strconv.ParseFloat(record[index], 64)
+				vector = append(vector, floatvalue)
+			}
+			thetaToDB(theta{ID: identifier, Text: text, Vector: vector})
+			recordcount++
+			fmt.Printf("\rWrote %d records to the database.", recordcount)
+		}
+		fmt.Println("All is read and written.")
 	}
-	fmt.Println("All is read.")
-	return result, topics
+	return topics
 }
 
 func main() {
@@ -125,7 +230,7 @@ func ViewPage(w http.ResponseWriter, r *http.Request) {
 		URN:   urn,
 		Count: count}
 
-	p, _ := loadPage(info, port)
+	p, _ := loadPage(info, address)
 	renderTemplate(w, "view", p)
 }
 
@@ -154,35 +259,52 @@ func ViewTopic(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	topic, _ := strconv.Atoi(vars["topic"])
 	count, _ := strconv.Atoi(vars["count"])
+	thetas := make([]theta, count)
 	topic = topic - 1
-	var searchedTopicFloats []float64
-	for i := range testset {
-		searchedTopicFloats = append(searchedTopicFloats, testset[i].Vector[topic])
+	db, err := bolt.Open(dbname, 0644, nil)
+	if err != nil {
+		log.Fatal(err)
 	}
-	var results []string
-	for j := 0; j < count; j++ {
-		number := strconv.Itoa(j + 1)
-		resultstring1 := ""
-		switch j {
-		case 0:
-			resultstring1 = "Rank " + number + ":"
-		default:
-			resultstring1 = "\n" + "Rank " + number + ":"
-		}
-		index := 0
-		biggest := searchedTopicFloats[index]
-		for i, v := range searchedTopicFloats {
-			if v > biggest {
-				biggest = v
-				index = i
+	defer db.Close()
+	db.View(func(tx *bolt.Tx) error {
+		// Assume bucket exists and has keys
+		b := tx.Bucket([]byte("theta"))
+
+		c := b.Cursor()
+		indexcount := 0
+
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			newtheta, _ := gobDecode(v)
+			if indexcount < count {
+				thetas[indexcount] = newtheta
+				indexcount++
+				continue
 			}
+			minindex, minfloat := minIndexTheta(thetas, topic)
+			if newtheta.Vector[topic] > minfloat {
+				thetas[minindex] = newtheta
+			}
+			indexcount++
 		}
+		return nil
+	})
+	var results []string
+
+	for i := range thetas {
+		resultstring1 := ""
+		switch i {
+		case 0:
+			resultstring1 = "Rank " + strconv.Itoa(i+1) + ":"
+		default:
+			resultstring1 = "\n" + "Rank " + strconv.Itoa(i+1) + ":"
+		}
+		maxindex, maxfloat := maxIndexTheta(thetas, topic)
 		percentage := "Topic" + vars["topic"] + ": "
-		percfloat := testset[index].Vector[topic] * 100
+		percfloat := maxfloat * 100
 		strnumber := strconv.FormatFloat(percfloat, 'f', 3, 64)
 		percentage = percentage + strnumber + " percent"
-		resultstring2 := strings.Join([]string{resultstring1, testset[index].ID, percentage, testset[index].Text}, "\n")
-		searchedTopicFloats[index] = float64(0)
+		resultstring2 := strings.Join([]string{resultstring1, thetas[maxindex].ID, percentage, thetas[maxindex].Text}, "\n")
+		thetas[maxindex].Vector[topic] = float64(0)
 		results = append(results, resultstring2)
 	}
 	result := strings.Join(results, "\n")
@@ -202,26 +324,24 @@ func check(e error) {
 	}
 }
 
-func findURN(urn string) int {
-	var result int
-	for i := range testset {
-		if testset[i].ID == urn {
-			result = i
-		}
-	}
-	return result
-}
-
-func loadPage(info Info, port string) (*Page, error) {
+func loadPage(info Info, address string) (*Page, error) {
 	urn := info.URN
-	position := findURN(urn)
-	number := info.Count
-	number = number + 1
+	query := theta{}
+	db, err := bolt.Open(dbname, 0644, nil)
+	check(err)
+	err = db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte("theta"))
+		if bucket == nil {
+			return fmt.Errorf("bucket %q not found", bucket)
+		}
+		val := bucket.Get([]byte(urn))
+		query, _ = gobDecode(val)
+		return nil
+	})
+	db.Close()
+	thetas, distances := testmanhattan(query, info.Count)
 	best := ""
 	text := ""
-
-	result := testmanhattan(testset[position], testset)
-	sorted_result := sortresults(result, number)
 
 	var resultNetwork Network
 	var texts []string
@@ -230,43 +350,45 @@ func loadPage(info Info, port string) (*Page, error) {
 	var bests []string
 	var signis []string
 
-	for i := range sorted_result {
+	for i := range thetas {
 		thebest := ""
 		signi := ""
-		index := floatfind(result, sorted_result[i])
 		switch {
 		case i == 0:
-			mandist := "0"
-			texts = append(texts, testset[index].Text)
-			ids = append(ids, testset[index].ID)
-			manhattans = append(manhattans, mandist)
-			sorted_indiresult := reversesortresults(testset[index].Vector, 3)
-			for j := range sorted_indiresult {
-				indi_index := floatfind(testset[index].Vector, sorted_indiresult[j])
-				normed := testset[index].Vector[indi_index] * 100
-				beststring := "Topic" + strconv.Itoa(indi_index+1) + " " + topics[indi_index] + ": " + strconv.FormatFloat(normed, 'f', 2, 64) + "%" + "</br>"
-				best = best + beststring
+			texts = append(texts, thetas[i].Text)
+			ids = append(ids, thetas[i].ID)
+			manhattans = append(manhattans, "0")
+			sortedIndiresult := reversesortresults(thetas[i].Vector, 3)
+			for j := range sortedIndiresult {
+				indiIndex := sortedIndiresult[j]
+				normed := thetas[i].Vector[indiIndex] * 100
+				if normed > 5 {
+					beststring := "Topic" + strconv.Itoa(indiIndex+1) + " " + topics[indiIndex] + ": " + strconv.FormatFloat(normed, 'f', 2, 64) + "%" + "</br>"
+					best = best + beststring
+				}
 			}
-			text = testset[index].Text
+			text = thetas[i].Text
 			signi = "Your Passage"
 			signis = append(signis, signi)
 			bests = append(bests, best)
 			resultNetwork.Nodes = append(resultNetwork.Nodes, Node{ID: urn, Label: urn, X: float64(1), Y: float64(1), Size: float64(1)})
 		case i > 0:
-			mannormed := sorted_result[i] * 100
+			mannormed := distances[i] * 100
 			mandist := strconv.FormatFloat(mannormed, 'f', 2, 64)
-			texts = append(texts, testset[index].Text)
-			ids = append(ids, testset[index].ID)
+			texts = append(texts, thetas[i].Text)
+			ids = append(ids, thetas[i].ID)
 			manhattans = append(manhattans, mandist)
-			sorted_indiresult := reversesortresults(testset[index].Vector, 3)
-			for j := range sorted_indiresult {
-				indi_index := floatfind(testset[index].Vector, sorted_indiresult[j])
-				normed := testset[index].Vector[indi_index] * 100
-				beststring := "Topic" + strconv.Itoa(indi_index+1) + " " + topics[indi_index] + ": " + strconv.FormatFloat(normed, 'f', 2, 64) + "%" + "</br>"
-				thebest = thebest + beststring
+			sortedIndiresult := reversesortresults(thetas[i].Vector, 3)
+			for j := range sortedIndiresult {
+				indiIndex := sortedIndiresult[j]
+				normed := thetas[i].Vector[indiIndex] * 100
+				if normed > 5 {
+					beststring := "Topic" + strconv.Itoa(indiIndex+1) + " " + topics[indiIndex] + ": " + strconv.FormatFloat(normed, 'f', 2, 64) + "%" + "</br>"
+					thebest = thebest + beststring
+				}
 			}
-			for j := range testset[index].Vector {
-				topicdistance := mpair(testset[index].Vector[j], testset[position].Vector[j])
+			for j := range thetas[i].Vector {
+				topicdistance := mpair(thetas[i].Vector[j], query.Vector[j])
 				if topicdistance > significant {
 					topicdistance = topicdistance * 100
 					signistring := "Distance Topic to " + strconv.Itoa(j+1) + " " + topics[j] + ": " + strconv.FormatFloat(topicdistance, 'f', 2, 64) + "%" + "</br>"
@@ -275,13 +397,13 @@ func loadPage(info Info, port string) (*Page, error) {
 			}
 			signis = append(signis, signi)
 			bests = append(bests, thebest)
-			xcord := float64(1) + float64(1)*sorted_result[i]
-			ycord := float64(1) + float64(-1)*sorted_result[i]
+			xcord := float64(1) + float64(1)*distances[i]
+			ycord := float64(1) + float64(-1)*distances[i]
 			var size float64
-			size = float64(1) * (float64(1) - sorted_result[i])
-			resultNetwork.Nodes = append(resultNetwork.Nodes, Node{ID: testset[index].ID, Label: testset[index].ID, X: xcord, Y: ycord, Size: size})
+			size = float64(1) * (float64(1) - distances[i])
+			resultNetwork.Nodes = append(resultNetwork.Nodes, Node{ID: thetas[i].ID, Label: thetas[i].ID, X: xcord, Y: ycord, Size: size})
 			edgeID := "edge" + strconv.Itoa(i)
-			resultNetwork.Edges = append(resultNetwork.Edges, Edge{ID: edgeID, Source: urn, Target: testset[index].ID})
+			resultNetwork.Edges = append(resultNetwork.Edges, Edge{ID: edgeID, Source: urn, Target: thetas[i].ID})
 		}
 	}
 	networkJSON, _ := json.Marshal(resultNetwork)
@@ -300,43 +422,45 @@ func loadPage(info Info, port string) (*Page, error) {
 	jsDistance := strings.Join(manhattans, ",")
 	jsBest := strings.Join(bests, ",")
 	jsSigni := strings.Join(signis, ",")
-	return &Page{URN: urn, Distance: distance, BestTopics: template.HTML(best), Text: text, Port: port, JSON: stringJSON, JSTexts: template.JS(jScript), JSIDs: template.JS(jSIDs), JSDistance: template.JS(jsDistance), JSBest: template.JS(jsBest), JSSigni: template.JS(jsSigni)}, nil
+	return &Page{URN: urn, Distance: distance, BestTopics: template.HTML(best), Text: text, Address: address, Port: port, Host: host, JSON: stringJSON, JSTexts: template.JS(jScript), JSIDs: template.JS(jSIDs), JSDistance: template.JS(jsDistance), JSBest: template.JS(jsBest), JSSigni: template.JS(jsSigni)}, nil
 }
 
 func JsonResponse(info Info) (PassageJsonResponse, error) {
-
 	urn := info.URN
-	position := findURN(urn)
-	number := info.Count + 1
+	query := theta{}
+	db, err := bolt.Open(dbname, 0644, nil)
+	check(err)
+	err = db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte("theta"))
+		if bucket == nil {
+			return fmt.Errorf("bucket %q not found", bucket)
+		}
+		val := bucket.Get([]byte(urn))
+		query, _ = gobDecode(val)
+		return nil
+	})
+	db.Close()
+	thetas, distances := testmanhattan(query, info.Count)
 	text := ""
-
-	result := testmanhattan(testset[position], testset)
-	sorted_result := sortresults(result, number)
-
-	var texts []string
 	var ids []string
 	var manhattans []string
 
-	for i := range sorted_result {
-		index := floatfind(result, sorted_result[i])
+	for i := range thetas {
 		switch {
 		case i == 0:
-			mandist := "0"
-			texts = append(texts, testset[index].Text)
-			ids = append(ids, testset[index].ID)
-			manhattans = append(manhattans, mandist)
-			text = testset[index].Text
+			ids = append(ids, thetas[i].ID)
+			manhattans = append(manhattans, "0")
+			text = thetas[i].Text
 		case i > 0:
-			mannormed := sorted_result[i] * 100
+			mannormed := distances[i] * 100
 			mandist := strconv.FormatFloat(mannormed, 'f', 2, 64)
-			texts = append(texts, testset[index].Text)
-			ids = append(ids, testset[index].ID)
+			ids = append(ids, thetas[i].ID)
 			manhattans = append(manhattans, mandist)
 		}
 	}
 
 	relatedItems := []relatedItem{}
-	for i := range texts {
+	for i := range ids {
 		relatedItems = append(relatedItems, relatedItem{Id: ids[i], Distance: manhattans[i]})
 	}
 
@@ -374,6 +498,8 @@ type Page struct {
 	BestTopics template.HTML
 	Text       string
 	Port       string
+	Host       string
+	Address    string
 	JSON       template.JS
 	JSTexts    template.JS
 	JSIDs      template.JS
@@ -401,6 +527,30 @@ func manhattan(x, y []float64) float64 {
 	return result
 }
 
+func minIndexTheta(thetas []theta, topic int) (index int, floatvalue float64) {
+	index = 0
+	floatvalue = thetas[index].Vector[topic]
+	for i, e := range thetas {
+		if e.Vector[topic] < floatvalue {
+			index = i
+			floatvalue = e.Vector[topic]
+		}
+	}
+	return
+}
+
+func maxIndexTheta(thetas []theta, topic int) (index int, floatvalue float64) {
+	index = 0
+	floatvalue = thetas[index].Vector[topic]
+	for i := range thetas {
+		if thetas[i].Vector[topic] > floatvalue {
+			index = i
+			floatvalue = thetas[i].Vector[topic]
+		}
+	}
+	return
+}
+
 func manhattan_wghted(x, y, weight []float64) float64 {
 	var result float64
 	for i := range x {
@@ -409,12 +559,67 @@ func manhattan_wghted(x, y, weight []float64) float64 {
 	return result
 }
 
-func testmanhattan(query theta, dataset []theta) []float64 {
-	var result []float64
-	for i := range dataset {
-		result = append(result, manhattan(query.Vector, dataset[i].Vector))
+func maxIndexDistance(distances []float64) (index int, floatvalue float64) {
+	index = 0
+	floatvalue = distances[index]
+	for i := range distances {
+		if distances[i] > floatvalue {
+			index = i
+			floatvalue = distances[i]
+		}
 	}
-	return result
+	return
+}
+
+type dataframe struct {
+	Thetas    []theta
+	Distances []float64
+}
+
+func (m dataframe) Len() int           { return len(m.Distances) }
+func (m dataframe) Less(i, j int) bool { return m.Distances[i] < m.Distances[j] }
+func (m dataframe) Swap(i, j int) {
+	m.Thetas[i], m.Thetas[j] = m.Thetas[j], m.Thetas[i]
+	m.Distances[i], m.Distances[j] = m.Distances[j], m.Distances[i]
+}
+
+func testmanhattan(query theta, count int) ([]theta, []float64) {
+	thetas := make([]theta, count+1)
+	distances := make([]float64, count+1)
+	db, err := bolt.Open(dbname, 0644, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+	db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("theta"))
+
+		c := b.Cursor()
+		indexcount := 0
+
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			newtheta, err := gobDecode(v)
+			if err != nil {
+				fmt.Println("decoding problem")
+			}
+			if indexcount <= count {
+				thetas[indexcount] = newtheta
+				distances[indexcount] = manhattan(query.Vector, newtheta.Vector)
+				indexcount++
+				continue
+			}
+			maxindex, maxfloat := maxIndexDistance(distances)
+			newdistance := manhattan(query.Vector, newtheta.Vector)
+			if newdistance < maxfloat {
+				thetas[maxindex] = newtheta
+				distances[maxindex] = newdistance
+			}
+			indexcount++
+		}
+		return nil
+	})
+	sort.Sort(dataframe{Thetas: thetas, Distances: distances})
+	return thetas, distances
 }
 
 func sortresults(result []float64, number int) []float64 {
@@ -427,17 +632,33 @@ func sortresults(result []float64, number int) []float64 {
 	return sorted_result
 }
 
-func reversesortresults(result []float64, number int) []float64 {
-	var sorted_result []float64
+func reversesortresults(result []float64, number int) []int {
+	sorted_result := make([]int, number)
+	sortedFloats := make([]float64, number)
+	lowestfloatindex := 0
+	lowestfloat := float64(0)
 	for i := range result {
-		sorted_result = append(sorted_result, result[i])
+		if i < number {
+			sorted_result[i] = i
+			sortedFloats[i] = result[i]
+			if i == 0 {
+				lowestfloat = result[i]
+				lowestfloatindex = i
+			}
+			if i != 0 {
+				if result[i] < lowestfloat {
+					lowestfloat = result[i]
+					lowestfloatindex = i
+				}
+			}
+			continue
+		}
+		if result[i] > lowestfloat {
+			sorted_result[lowestfloatindex] = i
+			sortedFloats[lowestfloatindex] = result[i]
+			lowestfloatindex, lowestfloat = maxIndexDistance(sortedFloats)
+		}
 	}
-	sort.Float64s(sorted_result)
-	for i := len(sorted_result)/2 - 1; i >= 0; i-- {
-		opp := len(sorted_result) - 1 - i
-		sorted_result[i], sorted_result[opp] = sorted_result[opp], sorted_result[i]
-	}
-	sorted_result = sorted_result[0:number]
 	return sorted_result
 }
 
@@ -448,6 +669,25 @@ func floatfind(slice []float64, value float64) int {
 		}
 	}
 	return -1
+}
+
+func getContent(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("GET error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Status error: %v", resp.StatusCode)
+	}
+
+	data, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("Read body: %v", err)
+	}
+
+	return data, nil
 }
 
 type PassageJsonResponse struct {

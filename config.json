@@ -1,5 +1,5 @@
 {
-"host": "localhost",
+"host": "http://localhost",
 "port": ":3737",
 "csv_source": "theta.csv",
 "local": true,
