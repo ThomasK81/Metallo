@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -22,24 +21,23 @@ type theta struct {
 	Vector []float64
 }
 
-var templates = template.Must(template.ParseFiles("tmpl/view.html", "tmpl/index.html"))
-
-var testset, topics = readTheta("theta.csv")
-var significant = setSignificance()
-
-const port = ":3737"
-
-func setSignificance() float64 {
-	significant := float64(0.1)
-	if len(os.Args) > 1 {
-		significant, _ = strconv.ParseFloat(os.Args[1], 64)
-	}
-	fmt.Println("Significance set to", significant)
-	fmt.Println("Happy navigating!")
-	return significant
+type serverConfig struct {
+	Host         string  `json:"host"`
+	Port         string  `json:"port"`
+	Source       string  `json:"csv_source"`
+	Local        bool    `json:"local"`
+	Significance float64 `json:"significance"`
 }
 
-func readTheta(file string) ([]theta, []string) {
+var templates = template.Must(template.ParseFiles("tmpl/view.html", "tmpl/index.html"))
+
+var confvar = loadConfiguration("./config.json")
+var testset, topics = readTheta()
+var significant = confvar.Significance
+var port = confvar.Port
+
+func readTheta() ([]theta, []string) {
+	file := confvar.Source
 	fmt.Println("Reading file.")
 	var topics []string
 	f, err := os.Open(file)
@@ -95,6 +93,18 @@ func main() {
 	log.Fatal(http.ListenAndServe(port, router))
 }
 
+func loadConfiguration(file string) serverConfig {
+	var config serverConfig
+	configFile, err := os.Open(file)
+	defer configFile.Close()
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	jsonParser := json.NewDecoder(configFile)
+	jsonParser.Decode(&config)
+	return config
+}
+
 // a function to enable CORS on a particular requestion
 func enableCors(w *http.ResponseWriter) {
 	(*w).Header().Set("Access-Control-Allow-Origin", "*")
@@ -110,8 +120,7 @@ func Index(w http.ResponseWriter, r *http.Request) {
 func ViewPage(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	urn := vars["urn"]
-	count := vars["count"]
-
+	count, _ := strconv.Atoi(vars["count"])
 	info := Info{
 		URN:   urn,
 		Count: count}
@@ -125,7 +134,7 @@ func ViewPageJs(w http.ResponseWriter, r *http.Request) {
 
 	vars := mux.Vars(r)
 	urn := vars["urn"]
-	count := vars["count"]
+	count, _ := strconv.Atoi(vars["count"])
 
 	info := Info{
 		URN:   urn,
@@ -206,9 +215,7 @@ func findURN(urn string) int {
 func loadPage(info Info, port string) (*Page, error) {
 	urn := info.URN
 	position := findURN(urn)
-	rank := info.Count
-	number, err := strconv.Atoi(rank)
-	check(err)
+	number := info.Count
 	number = number + 1
 	best := ""
 	text := ""
@@ -277,9 +284,11 @@ func loadPage(info Info, port string) (*Page, error) {
 			resultNetwork.Edges = append(resultNetwork.Edges, Edge{ID: edgeID, Source: urn, Target: testset[index].ID})
 		}
 	}
-	createNetwork(resultNetwork)
+	networkJSON, _ := json.Marshal(resultNetwork)
+	stringJSON := template.JS(string(networkJSON))
 	distance := strconv.FormatFloat(significant, 'f', -1, 64)
 	for i := range texts {
+		texts[i] = strings.Replace(texts[i], "\"", "'", -1)
 		texts[i] = "\"" + texts[i] + "\""
 		ids[i] = "\"" + ids[i] + "\""
 		manhattans[i] = "\"" + manhattans[i] + "\""
@@ -291,27 +300,14 @@ func loadPage(info Info, port string) (*Page, error) {
 	jsDistance := strings.Join(manhattans, ",")
 	jsBest := strings.Join(bests, ",")
 	jsSigni := strings.Join(signis, ",")
-	return &Page{URN: urn, Distance: distance, BestTopics: template.HTML(best), Text: text, Port: port, JSTexts: template.JS(jScript), JSIDs: template.JS(jSIDs), JSDistance: template.JS(jsDistance), JSBest: template.JS(jsBest), JSSigni: template.JS(jsSigni)}, nil
-}
-
-func createNetwork(resultNetwork Network) {
-	networkJSON, err := json.Marshal(resultNetwork)
-	check(err)
-
-	filename := "static/data2.json"
-	ioutil.WriteFile(filename, networkJSON, 0600)
-
-	return
+	return &Page{URN: urn, Distance: distance, BestTopics: template.HTML(best), Text: text, Port: port, JSON: stringJSON, JSTexts: template.JS(jScript), JSIDs: template.JS(jSIDs), JSDistance: template.JS(jsDistance), JSBest: template.JS(jsBest), JSSigni: template.JS(jsSigni)}, nil
 }
 
 func JsonResponse(info Info) (PassageJsonResponse, error) {
 
 	urn := info.URN
 	position := findURN(urn)
-	rank := info.Count
-	number, err := strconv.Atoi(rank)
-	check(err)
-	number = number + 1
+	number := info.Count + 1
 	text := ""
 
 	result := testmanhattan(testset[position], testset)
@@ -368,7 +364,8 @@ type Edge struct {
 }
 
 type Info struct {
-	URN, Count string
+	URN   string
+	Count int
 }
 
 type Page struct {
@@ -377,6 +374,7 @@ type Page struct {
 	BestTopics template.HTML
 	Text       string
 	Port       string
+	JSON       template.JS
 	JSTexts    template.JS
 	JSIDs      template.JS
 	JSDistance template.JS
