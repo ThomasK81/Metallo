@@ -99,8 +99,7 @@ func thetaToDB(thetafile theta) error {
 }
 
 func readTheta() []string {
-	err := os.Remove(dbname)
-	check(err)
+	os.Remove(dbname)
 	file := confvar.Source
 	fmt.Println("Reading file.")
 	var topics []string
