@@ -7,6 +7,7 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"html/template"
 	"io"
@@ -39,13 +40,29 @@ type serverConfig struct {
 var templates = template.Must(template.ParseFiles("tmpl/view.html", "tmpl/index.html"))
 
 var confvar = loadConfiguration("./config.json")
-var topics = readTheta()
+var topics = []string{}
 var significant = confvar.Significance
 var port = confvar.Port
 var host = confvar.Host
 var address = host + port
 var pwd, _ = os.Getwd()
 var dbname = pwd + "/metallo.db"
+
+func retrieveTopics() (topics []string) {
+	db, err := bolt.Open(dbname, 0644, nil)
+	check(err)
+	err = db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte("topics"))
+		if bucket == nil {
+			return fmt.Errorf("bucket not found")
+		}
+		val := bucket.Get([]byte("topics"))
+		topics, _ = gobDecodeTopics(val)
+		return nil
+	})
+	db.Close()
+	return topics
+}
 
 func gobEncode(p interface{}) ([]byte, error) {
 	buf := new(bytes.Buffer)
@@ -64,6 +81,17 @@ func gobDecode(data []byte) (theta, error) {
 	err := dec.Decode(&p)
 	if err != nil {
 		return theta{}, err
+	}
+	return *p, nil
+}
+
+func gobDecodeTopics(data []byte) ([]string, error) {
+	var p *[]string
+	buf := bytes.NewBuffer(data)
+	dec := gob.NewDecoder(buf)
+	err := dec.Decode(&p)
+	if err != nil {
+		return []string{}, err
 	}
 	return *p, nil
 }
@@ -177,10 +205,37 @@ func readTheta() []string {
 		}
 		fmt.Println("All is read and written.")
 	}
+
+	dbkey := []byte("topics")
+	dbvalue, err := gobEncode(&topics)
+	db, err := bolt.Open(dbname, 0644, nil)
+	check(err)
+	defer db.Close()
+	err = db.Update(func(tx *bolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte("topics"))
+		if err != nil {
+			return err
+		}
+		err = bucket.Put(dbkey, dbvalue)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	check(err)
 	return topics
 }
 
 func main() {
+	loadDB := flag.Bool("loadDB", false, "load DB from CSV")
+	flag.Parse()
+	if *loadDB {
+		fmt.Println("(Re-)building the db...")
+		topics = readTheta()
+	} else {
+		fmt.Println("Starting without re-building the db...")
+		topics = retrieveTopics()
+	}
 	router := mux.NewRouter().StrictSlash(true)
 	s := http.StripPrefix("/static/", http.FileServer(http.Dir("./static/")))
 	js := http.StripPrefix("/js/", http.FileServer(http.Dir("./js/")))
