@@ -43,8 +43,7 @@ var confvar = loadConfiguration("./config.json")
 var topics = []string{}
 var significant = confvar.Significance
 var port = confvar.Port
-var host = confvar.Host
-var address = host + port
+var address = confvar.Host
 var pwd, _ = os.Getwd()
 var dbname = pwd + "/metallo.db"
 
@@ -476,7 +475,7 @@ func loadPage(info Info, address string) (*Page, error) {
 	jsDistance := strings.Join(manhattans, ",")
 	jsBest := strings.Join(bests, ",")
 	jsSigni := strings.Join(signis, ",")
-	return &Page{URN: urn, Distance: distance, BestTopics: template.HTML(best), Text: text, Address: address, Port: port, Host: host, JSON: stringJSON, JSTexts: template.JS(jScript), JSIDs: template.JS(jSIDs), JSDistance: template.JS(jsDistance), JSBest: template.JS(jsBest), JSSigni: template.JS(jsSigni)}, nil
+	return &Page{URN: urn, Distance: distance, BestTopics: template.HTML(best), Text: text, Address: address, Port: port, JSON: stringJSON, JSTexts: template.JS(jScript), JSIDs: template.JS(jSIDs), JSDistance: template.JS(jsDistance), JSBest: template.JS(jsBest), JSSigni: template.JS(jsSigni)}, nil
 }
 
 func JsonResponse(info Info) (PassageJsonResponse, error) {

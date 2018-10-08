@@ -1,5 +1,5 @@
 {
-"host": "http://localhost",
+"host": "http://localhost:3737",
 "port": ":3737",
 "csv_source": "scta.csv",
 "local": true,
