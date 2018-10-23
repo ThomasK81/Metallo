@@ -245,6 +245,7 @@ func main() {
 	// router.HandleFunc("/load/{theta}", LoadDB)
 	router.HandleFunc("/view/{urn}/{count}", ViewPage)
 	router.HandleFunc("/view/{urn}/{count}/json", ViewPageJs)
+	router.HandleFunc("/idtopicmap/json", IdTopicMap)
 	router.HandleFunc("/topic/{topic}/{count}", ViewTopic)
 	router.HandleFunc("/", Index)
 	log.Println("Listening at" + port + "...")
@@ -285,6 +286,33 @@ func ViewPage(w http.ResponseWriter, r *http.Request) {
 
 	p, _ := loadPage(info, address)
 	renderTemplate(w, "view", p)
+}
+
+func IdTopicMap(w http.ResponseWriter, r *http.Request) {
+	enableCors(&w)
+
+	db, err := bolt.Open(dbname, 0644, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+	db.View(func(tx *bolt.Tx) error {
+		return tx.ForEach(func(name []byte, _ *bolt.Bucket) error {
+            fmt.Println(string(name))
+            return nil
+        })
+
+	})
+
+	data := make(map[string]string)
+	data["a"] = "b"
+	data["c"] = "d"
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		fmt.Fprintln(w, string("error"))
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	fmt.Fprintln(w, string(bytes))
 }
 
 func ViewPageJs(w http.ResponseWriter, r *http.Request) {
