@@ -288,25 +288,80 @@ func ViewPage(w http.ResponseWriter, r *http.Request) {
 	renderTemplate(w, "view", p)
 }
 
+type IdStruct struct {
+	Id []string `json:"id"`
+
+}
+
+
 func IdTopicMap(w http.ResponseWriter, r *http.Request) {
 	enableCors(&w)
+	fmt.Println("header", r.Header)
+	decoder := json.NewDecoder(r.Body)
+
+	var dataNew []string
+	err := decoder.Decode(&dataNew)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(dataNew)
 
 	db, err := bolt.Open(dbname, 0644, nil)
+	query := theta{}
+	ids := make([]string, 0)
+
+	for _, id := range dataNew {
+		ids = append(ids, id)
+	}
+	// these appends need to be replaced by ingest of post data
+	// ids = append(ids, "cice-l2t20-d1e680")
+	// ids = append(ids, "l21-apecie")
+	// ids = append(ids, "l32-qasidf")
+	// ids = append(ids, "ppr-l27-ppncie")
+	// ids = append(ids, "ppr-l27-ppncie")
+	// ids = append(ids, "ahsh-l1p1i2t1q1t1c3-d1e4537")
+	// ids = append(ids, "ahsh-l1p1i2t1q2-d1e4319")
+
+	results := make([]TopicMap, 0)
+
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
 	db.View(func(tx *bolt.Tx) error {
-		return tx.ForEach(func(name []byte, _ *bolt.Bucket) error {
-            fmt.Println(string(name))
-            return nil
-        })
 
-	})
+		bucket := tx.Bucket([]byte("theta"))
+		if bucket == nil {
+			return fmt.Errorf("bucket %q not found", bucket)
+		}
 
-	data := make(map[string]string)
-	data["a"] = "b"
-	data["c"] = "d"
+		for index, _ := range ids {
+	    // only perform query if id is not empty
+    	val := bucket.Get([]byte(ids[index]))
+			query, _ = gobDecode(val)
+			vector := query.Vector
+			maxIndex, max := maxIndexDistance(vector)
+
+			resultsObject := TopicMap{
+				MaxIndex: maxIndex,
+				Max: max}
+
+			results = append(results, resultsObject)
+		}
+		//uncomment to see output in console
+		//fmt.Println(maxIndex, max)
+
+		  return nil
+		})
+
+	data := make(map[string]TopicMap)
+	for index, element := range results{
+		data[ids[index]] = element
+	}
+
+	//data[ids[0]] = maxIndex
+	//data["c"] = 1
 	bytes, err := json.Marshal(data)
 	if err != nil {
 		fmt.Fprintln(w, string("error"))
@@ -776,6 +831,12 @@ type PassageJsonResponse struct {
 	Text  string        `json:"text"`
 	Items []relatedItem `json:"items"`
 }
+
+type TopicMap struct {
+	MaxIndex  int   `json:"maxindex"`
+	Max float64 		`json:"max"`
+}
+
 type relatedItem struct {
 	Id       string `json:"id"`
 	Distance string `json:"distance"`
