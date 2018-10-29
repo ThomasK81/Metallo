@@ -337,17 +337,18 @@ func IdTopicMap(w http.ResponseWriter, r *http.Request) {
 		}
 
 		for index, _ := range ids {
-	    // only perform query if id is not empty
+
     	val := bucket.Get([]byte(ids[index]))
 			query, _ = gobDecode(val)
 			vector := query.Vector
-			maxIndex, max := maxIndexDistance(vector)
-
-			resultsObject := TopicMap{
-				MaxIndex: maxIndex,
-				Max: max}
-
-			results = append(results, resultsObject)
+			// only perform query if id sent from post is found in Metallo DB
+			if len(vector) > 0 {
+				maxIndex, max := maxIndexDistance(vector)
+				resultsObject := TopicMap{
+					MaxIndex: maxIndex,
+					Max: max}
+				results = append(results, resultsObject)
+			}
 		}
 		//uncomment to see output in console
 		//fmt.Println(maxIndex, max)
