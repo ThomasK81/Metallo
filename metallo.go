@@ -225,6 +225,8 @@ func readTheta() []string {
 	return topics
 }
 
+//TODO: json routes could be more intuitive or have a more consistent pattern
+//(such as using .json and .html) to facilitate content negotionation
 func main() {
 	loadDB := flag.Bool("loadDB", false, "load DB from CSV")
 	flag.Parse()
@@ -296,49 +298,36 @@ type IdStruct struct {
 
 func IdTopicMap(w http.ResponseWriter, r *http.Request) {
 	enableCors(&w)
-	fmt.Println("header", r.Header)
+	// decode post body
 	decoder := json.NewDecoder(r.Body)
-
-	var dataNew []string
-	err := decoder.Decode(&dataNew)
+	// create empty array for id string values
+	var ids []string
+	// enter post data (ids) into ids array
+	err := decoder.Decode(&ids)
 	if err != nil {
 		panic(err)
 	}
-
-	fmt.Println(dataNew)
-
+	//open database
 	db, err := bolt.Open(dbname, 0644, nil)
 	query := theta{}
-	ids := make([]string, 0)
-
-	for _, id := range dataNew {
-		ids = append(ids, id)
-	}
-	// these appends need to be replaced by ingest of post data
-	// ids = append(ids, "cice-l2t20-d1e680")
-	// ids = append(ids, "l21-apecie")
-	// ids = append(ids, "l32-qasidf")
-	// ids = append(ids, "ppr-l27-ppncie")
-	// ids = append(ids, "ppr-l27-ppncie")
-	// ids = append(ids, "ahsh-l1p1i2t1q1t1c3-d1e4537")
-	// ids = append(ids, "ahsh-l1p1i2t1q2-d1e4319")
-
-	results := make([]TopicMap, 0)
-
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
-	db.View(func(tx *bolt.Tx) error {
 
+	// create empty associate array to hold id and TopicMap association
+	data := make(map[string]TopicMap)
+
+	// begin database lookup
+	db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte("theta"))
 		if bucket == nil {
 			return fmt.Errorf("bucket %q not found", bucket)
 		}
+		//loop through ids and get corresponding TopicMap object and then associate with id
+		for _, id := range ids {
 
-		for index, _ := range ids {
-
-    	val := bucket.Get([]byte(ids[index]))
+    	val := bucket.Get([]byte(id))
 			query, _ = gobDecode(val)
 			vector := query.Vector
 			// only perform query if id sent from post is found in Metallo DB
@@ -347,22 +336,13 @@ func IdTopicMap(w http.ResponseWriter, r *http.Request) {
 				resultsObject := TopicMap{
 					MaxIndex: maxIndex,
 					Max: max}
-				results = append(results, resultsObject)
+				data[id] = resultsObject
 			}
 		}
-		//uncomment to see output in console
-		//fmt.Println(maxIndex, max)
-
 		  return nil
 		})
 
-	data := make(map[string]TopicMap)
-	for index, element := range results{
-		data[ids[index]] = element
-	}
-
-	//data[ids[0]] = maxIndex
-	//data["c"] = 1
+	//create json data
 	bytes, err := json.Marshal(data)
 	if err != nil {
 		fmt.Fprintln(w, string("error"))
