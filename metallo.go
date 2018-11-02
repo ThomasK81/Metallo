@@ -225,6 +225,8 @@ func readTheta() []string {
 	return topics
 }
 
+//TODO: json routes could be more intuitive or have a more consistent pattern
+//(such as using .json and .html) to facilitate content negotionation
 func main() {
 	loadDB := flag.Bool("loadDB", false, "load DB from CSV")
 	flag.Parse()
@@ -245,6 +247,7 @@ func main() {
 	// router.HandleFunc("/load/{theta}", LoadDB)
 	router.HandleFunc("/view/{urn}/{count}", ViewPage)
 	router.HandleFunc("/view/{urn}/{count}/json", ViewPageJs)
+	router.HandleFunc("/idtopicmap/json", IdTopicMap)
 	router.HandleFunc("/topic/{topic}/{count}", ViewTopic)
 	router.HandleFunc("/", Index)
 	log.Println("Listening at" + port + "...")
@@ -285,6 +288,67 @@ func ViewPage(w http.ResponseWriter, r *http.Request) {
 
 	p, _ := loadPage(info, address)
 	renderTemplate(w, "view", p)
+}
+
+type IdStruct struct {
+	Id []string `json:"id"`
+
+}
+
+
+func IdTopicMap(w http.ResponseWriter, r *http.Request) {
+	enableCors(&w)
+	// decode post body
+	decoder := json.NewDecoder(r.Body)
+	// create empty array for id string values
+	var ids []string
+	// enter post data (ids) into ids array
+	err := decoder.Decode(&ids)
+	if err != nil {
+		panic(err)
+	}
+	//open database
+	db, err := bolt.Open(dbname, 0644, nil)
+	query := theta{}
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	// create empty associate array to hold id and TopicMap association
+	data := make(map[string]TopicMap)
+
+	// begin database lookup
+	db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte("theta"))
+		if bucket == nil {
+			return fmt.Errorf("bucket %q not found", bucket)
+		}
+		//loop through ids and get corresponding TopicMap object and then associate with id
+		for _, id := range ids {
+
+    	val := bucket.Get([]byte(id))
+			query, _ = gobDecode(val)
+			vector := query.Vector
+			// only perform query if id sent from post is found in Metallo DB
+			if len(vector) > 0 {
+				maxIndex, max := maxIndexDistance(vector)
+				resultsObject := TopicMap{
+					MaxIndex: maxIndex,
+					Max: max}
+				data[id] = resultsObject
+			}
+		}
+		  return nil
+		})
+
+	//create json data
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		fmt.Fprintln(w, string("error"))
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	fmt.Fprintln(w, string(bytes))
 }
 
 func ViewPageJs(w http.ResponseWriter, r *http.Request) {
@@ -748,6 +812,12 @@ type PassageJsonResponse struct {
 	Text  string        `json:"text"`
 	Items []relatedItem `json:"items"`
 }
+
+type TopicMap struct {
+	MaxIndex  int   `json:"maxindex"`
+	Max float64 		`json:"max"`
+}
+
 type relatedItem struct {
 	Id       string `json:"id"`
 	Distance string `json:"distance"`
