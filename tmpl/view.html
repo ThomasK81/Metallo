@@ -110,40 +110,6 @@
 
   </script>
 
-  <!-- <script>
-  sigma.parsers.json({{.JSON}},
-  {container: 'sigma-container'},
-  function(s) { //This function is passed an instance of Sigma s
-
-
-    s.bind('clickNode', function(e) {
-    var baselink = "{{.Address}}/view/"
-    var basenumber = "/10"
-    var targetlink = baselink.concat(e.data.node.label, basenumber);
-    window.open(targetlink,'_self',false);
-});
-s.bind('overNode', function(onode) {
-  var texts = [{{.JSTexts}}];
-  var ids = [{{.JSIDs}}];
-  var manhattans = [{{.JSDistance}}];
-  var bests = [{{.JSBest}}];
-  var signis = [{{.JSSigni}}];
-  var index = ids.indexOf(onode.data.node.label);
-
-  var output = "<strong>" + ids[index] + "</strong>" + "</br>" + texts[index];
-  var output2 = "Rank: " + index + "</br>" + "Distance: "+ manhattans[index] + "</br>" + "Important Topics:" + "</br>" + bests[index] + "</br>" + "Topics with significant distance:" + "</br>" + signis[index];
-
-  if (index == 0) {
-    output = "<strong>Searched passage!</strong>";
-    output2 = ""
-};
-
-
-  document.getElementById("nodeinformation").innerHTML = output;
-  document.getElementById("noderank").innerHTML = output2;
-});
-  });
-</script> -->
 </body>
 
 </html>

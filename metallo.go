@@ -13,6 +13,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -35,6 +36,7 @@ type serverConfig struct {
 	Source       string  `json:"csv_source"`
 	Local        bool    `json:"local"`
 	Significance float64 `json:"significance"`
+	Distance     string  `json:"distance"`
 }
 
 var templates = template.Must(template.ParseFiles("tmpl/view.html", "tmpl/index.html"))
@@ -44,6 +46,7 @@ var topics = []string{}
 var significant = confvar.Significance
 var port = confvar.Port
 var address = confvar.Host
+var distance = confvar.Distance
 var pwd, _ = os.Getwd()
 var dbname = pwd + "/metallo.db"
 
@@ -580,6 +583,22 @@ func manhattan(x, y []float64) float64 {
 	return result
 }
 
+func jensenShannon(x, y []float64) float64 {
+	var result float64
+	for i, v := range x {
+		m := 0.5 * (v + y[i])
+		if v != 0 {
+			// add kl from p to m
+			result += 0.5 * v * (math.Log(v) - math.Log(m))
+		}
+		if y[i] != 0 {
+			// add kl from q to m
+			result += 0.5 * y[i] * (math.Log(y[i]) - math.Log(m))
+		}
+	}
+	return result
+}
+
 func minIndexTheta(thetas []theta, topic int) (index int, floatvalue float64) {
 	index = 0
 	floatvalue = thetas[index].Vector[topic]
@@ -657,12 +676,23 @@ func testmanhattan(query theta, count int) ([]theta, []float64) {
 			}
 			if indexcount <= count {
 				thetas[indexcount] = newtheta
-				distances[indexcount] = manhattan(query.Vector, newtheta.Vector)
+				switch distance {
+				case "jsd":
+					distances[indexcount] = jensenShannon(query.Vector, newtheta.Vector)
+				default:
+					distances[indexcount] = manhattan(query.Vector, newtheta.Vector)
+				}
 				indexcount++
 				continue
 			}
 			maxindex, maxfloat := maxIndexDistance(distances)
-			newdistance := manhattan(query.Vector, newtheta.Vector)
+			var newdistance float64
+			switch distance {
+			case "jsd":
+				newdistance = jensenShannon(query.Vector, newtheta.Vector)
+			default:
+				newdistance = manhattan(query.Vector, newtheta.Vector)
+			}
 			if newdistance < maxfloat {
 				thetas[maxindex] = newtheta
 				distances[maxindex] = newdistance

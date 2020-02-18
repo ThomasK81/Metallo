@@ -1,7 +1,8 @@
 {
 "host": "http://localhost:3737",
 "port": ":3737",
-"csv_source": "theta4.csv",
+"csv_source": "theta.csv",
 "local": true,
-"significance": 0.1
+"significance": 0.1,
+"distance": "jsd"
 }
