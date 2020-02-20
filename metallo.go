@@ -30,11 +30,24 @@ type theta struct {
 	Vector []float64
 }
 
+type ptopic struct {
+	ID    string
+	Text  string
+	Value float64
+}
+
+type Divergence struct {
+	SourceID     string  `json:"source"`
+	TargetID     string  `json:"target"`
+	JSDivergence float64 `json:"jsd"`
+}
+
 type serverConfig struct {
 	Host         string  `json:"host"`
 	Port         string  `json:"port"`
 	Source       string  `json:"csv_source"`
 	Local        bool    `json:"local"`
+	DB           bool    `json:"db"`
 	Significance float64 `json:"significance"`
 	Distance     string  `json:"distance"`
 }
@@ -43,12 +56,14 @@ var templates = template.Must(template.ParseFiles("tmpl/view.html", "tmpl/index.
 
 var confvar = loadConfiguration("./config.json")
 var topics = []string{}
+var backend = []theta{}
 var significant = confvar.Significance
 var port = confvar.Port
 var address = confvar.Host
 var distance = confvar.Distance
 var pwd, _ = os.Getwd()
 var dbname = pwd + "/metallo.db"
+var distnorm float64
 
 func retrieveTopics() (topics []string) {
 	db, err := bolt.Open(dbname, 0644, nil)
@@ -126,6 +141,86 @@ func thetaToDB(thetafile theta) error {
 		return err
 	}
 	return nil
+}
+
+func readThetaNoDB() (result []theta, topics []string) {
+	file := confvar.Source
+	fmt.Println("Reading file.")
+	switch confvar.Local {
+	case false:
+		fmt.Println("Fetching external resource.")
+		data, _ := getContent(file)
+		str := string(data)
+		reader := csv.NewReader(strings.NewReader(str))
+		reader.LazyQuotes = true
+		lines, err := reader.ReadAll()
+		if err != nil {
+			log.Fatalf("error reading all lines: %v", err)
+		}
+
+		for i, line := range lines {
+			if i == 0 {
+				for i := range line {
+					if i < 3 {
+						continue
+					}
+					topics = append(topics, line[i])
+				}
+				continue
+			}
+			identifier := line[1]
+			text := line[2]
+			vector := []float64{}
+			for i := range line[3:len(line)] {
+				index := i + 3
+				floatvalue, _ := strconv.ParseFloat(line[index], 64)
+				vector = append(vector, floatvalue)
+			}
+			result = append(result, theta{ID: identifier, Text: text, Vector: vector})
+		}
+		fmt.Println("All is read.")
+	case true:
+		fmt.Println("Fetching internal resource.")
+		f, err := os.Open(file)
+		if err != nil {
+			fmt.Println("could not open file")
+		}
+		defer f.Close()
+		reader := csv.NewReader(bufio.NewReader(f))
+		reader.LazyQuotes = true
+
+		linecount := 0
+		recordcount := 0
+		for {
+			record, err := reader.Read()
+			if err == io.EOF {
+				break
+			}
+			if linecount == 0 {
+				for j := range record {
+					if j < 3 {
+						continue
+					}
+					topics = append(topics, record[j])
+				}
+				linecount++
+				continue
+			}
+			identifier := record[1]
+			text := record[2]
+			vector := []float64{}
+			for j := range record[3:len(record)] {
+				index := j + 3
+				floatvalue, _ := strconv.ParseFloat(record[index], 64)
+				vector = append(vector, floatvalue)
+			}
+			result = append(result, theta{ID: identifier, Text: text, Vector: vector})
+			recordcount++
+			fmt.Printf("\rWrote %d records to memory.", recordcount)
+		}
+		fmt.Println("All is read and written.")
+	}
+	return result, topics
 }
 
 func readTheta() []string {
@@ -231,12 +326,17 @@ func readTheta() []string {
 func main() {
 	loadDB := flag.Bool("loadDB", false, "load DB from CSV")
 	flag.Parse()
-	if *loadDB {
-		fmt.Println("(Re-)building the db...")
-		topics = readTheta()
+	if confvar.DB {
+		if *loadDB {
+			fmt.Println("(Re-)building the db...")
+			topics = readTheta()
+		} else {
+			fmt.Println("Starting without re-building the db...")
+			topics = retrieveTopics()
+		}
 	} else {
-		fmt.Println("Starting without re-building the db...")
-		topics = retrieveTopics()
+		fmt.Println("Starting without a database. Keeping it all in memory...")
+		backend, topics = readThetaNoDB()
 	}
 	router := mux.NewRouter().StrictSlash(true)
 	s := http.StripPrefix("/static/", http.FileServer(http.Dir("./static/")))
@@ -316,21 +416,39 @@ func ViewTopic(w http.ResponseWriter, r *http.Request) {
 	topic, _ := strconv.Atoi(vars["topic"])
 	count, _ := strconv.Atoi(vars["count"])
 	thetas := make([]theta, count)
+	resultsorted := make([]ptopic, count)
 	topic = topic - 1
-	db, err := bolt.Open(dbname, 0644, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-	db.View(func(tx *bolt.Tx) error {
-		// Assume bucket exists and has keys
-		b := tx.Bucket([]byte("theta"))
+	if confvar.DB {
+		db, err := bolt.Open(dbname, 0644, nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer db.Close()
+		db.View(func(tx *bolt.Tx) error {
+			// Assume bucket exists and has keys
+			b := tx.Bucket([]byte("theta"))
 
-		c := b.Cursor()
+			c := b.Cursor()
+			indexcount := 0
+
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				newtheta, _ := gobDecode(v)
+				if indexcount < count {
+					thetas[indexcount] = newtheta
+					indexcount++
+					continue
+				}
+				minindex, minfloat := minIndexTheta(thetas, topic)
+				if newtheta.Vector[topic] > minfloat {
+					thetas[minindex] = newtheta
+				}
+			}
+			return nil
+		})
+	} else {
 		indexcount := 0
-
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			newtheta, _ := gobDecode(v)
+		for _, v := range backend {
+			newtheta := v
 			if indexcount < count {
 				thetas[indexcount] = newtheta
 				indexcount++
@@ -340,13 +458,15 @@ func ViewTopic(w http.ResponseWriter, r *http.Request) {
 			if newtheta.Vector[topic] > minfloat {
 				thetas[minindex] = newtheta
 			}
-			indexcount++
 		}
-		return nil
-	})
+	}
+	for _, v := range thetas {
+		resultsorted = append(resultsorted, ptopic{ID: v.ID, Text: v.Text, Value: v.Vector[topic]})
+	}
+
 	var results []string
 
-	for i := range thetas {
+	for i := range resultsorted {
 		resultstring1 := ""
 		switch i {
 		case 0:
@@ -354,13 +474,13 @@ func ViewTopic(w http.ResponseWriter, r *http.Request) {
 		default:
 			resultstring1 = "\n" + "Rank " + strconv.Itoa(i+1) + ":"
 		}
-		maxindex, maxfloat := maxIndexTheta(thetas, topic)
+		maxindex, maxfloat := maxIndexTheta(resultsorted)
 		percentage := "Topic" + vars["topic"] + ": "
 		percfloat := maxfloat * 100
 		strnumber := strconv.FormatFloat(percfloat, 'f', 3, 64)
 		percentage = percentage + strnumber + " percent"
-		resultstring2 := strings.Join([]string{resultstring1, thetas[maxindex].ID, percentage, thetas[maxindex].Text}, "\n")
-		thetas[maxindex].Vector[topic] = float64(0)
+		resultstring2 := strings.Join([]string{resultstring1, resultsorted[maxindex].ID, percentage, resultsorted[maxindex].Text}, "\n")
+		resultsorted[maxindex].Value = float64(0)
 		results = append(results, resultstring2)
 	}
 	result := strings.Join(results, "\n")
@@ -383,19 +503,28 @@ func check(e error) {
 func loadPage(info Info, address string) (*Page, error) {
 	urn := info.URN
 	query := theta{}
-	db, err := bolt.Open(dbname, 0644, nil)
-	check(err)
-	err = db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte("theta"))
-		if bucket == nil {
-			return fmt.Errorf("bucket %q not found", bucket)
+	if confvar.DB {
+		db, err := bolt.Open(dbname, 0644, nil)
+		check(err)
+		err = db.View(func(tx *bolt.Tx) error {
+			bucket := tx.Bucket([]byte("theta"))
+			if bucket == nil {
+				return fmt.Errorf("bucket %q not found", bucket)
+			}
+			val := bucket.Get([]byte(urn))
+			query, _ = gobDecode(val)
+			return nil
+		})
+		db.Close()
+	} else {
+		for _, v := range backend {
+			if v.ID == urn {
+				query = v
+				break
+			}
 		}
-		val := bucket.Get([]byte(urn))
-		query, _ = gobDecode(val)
-		return nil
-	})
-	db.Close()
-	thetas, distances := testmanhattan(query, info.Count)
+	}
+	thetas, distances := calculateDistance(query, info.Count)
 	best := ""
 	text := ""
 
@@ -453,8 +582,8 @@ func loadPage(info Info, address string) (*Page, error) {
 			}
 			signis = append(signis, signi)
 			bests = append(bests, thebest)
-			xcord := float64(1) + float64(1)*distances[i]
-			ycord := float64(1) + float64(-1)*distances[i]
+			xcord := float64(1) + float64(1)*distances[i]*10
+			ycord := float64(1) + float64(-1)*distances[i]*10
 			var size float64
 			size = float64(1) * (float64(1) - distances[i])
 			resultNetwork.Nodes = append(resultNetwork.Nodes, Node{ID: thetas[i].ID, Label: thetas[i].ID, X: xcord, Y: ycord, Size: size})
@@ -484,19 +613,28 @@ func loadPage(info Info, address string) (*Page, error) {
 func JsonResponse(info Info) (PassageJsonResponse, error) {
 	urn := info.URN
 	query := theta{}
-	db, err := bolt.Open(dbname, 0644, nil)
-	check(err)
-	err = db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte("theta"))
-		if bucket == nil {
-			return fmt.Errorf("bucket %q not found", bucket)
+	if confvar.DB {
+		db, err := bolt.Open(dbname, 0644, nil)
+		check(err)
+		err = db.View(func(tx *bolt.Tx) error {
+			bucket := tx.Bucket([]byte("theta"))
+			if bucket == nil {
+				return fmt.Errorf("bucket %q not found", bucket)
+			}
+			val := bucket.Get([]byte(urn))
+			query, _ = gobDecode(val)
+			return nil
+		})
+		db.Close()
+	} else {
+		for _, v := range backend {
+			if v.ID == urn {
+				query = v
+				break
+			}
 		}
-		val := bucket.Get([]byte(urn))
-		query, _ = gobDecode(val)
-		return nil
-	})
-	db.Close()
-	thetas, distances := testmanhattan(query, info.Count)
+	}
+	thetas, distances := calculateDistance(query, info.Count)
 	text := ""
 	var ids []string
 	var manhattans []string
@@ -611,13 +749,13 @@ func minIndexTheta(thetas []theta, topic int) (index int, floatvalue float64) {
 	return
 }
 
-func maxIndexTheta(thetas []theta, topic int) (index int, floatvalue float64) {
+func maxIndexTheta(resultsorted []ptopic) (index int, floatvalue float64) {
 	index = 0
-	floatvalue = thetas[index].Vector[topic]
-	for i := range thetas {
-		if thetas[i].Vector[topic] > floatvalue {
+	floatvalue = resultsorted[index].Value
+	for i, v := range resultsorted {
+		if v.Value > floatvalue {
 			index = i
-			floatvalue = thetas[i].Vector[topic]
+			floatvalue = v.Value
 		}
 	}
 	return
@@ -655,25 +793,58 @@ func (m dataframe) Swap(i, j int) {
 	m.Distances[i], m.Distances[j] = m.Distances[j], m.Distances[i]
 }
 
-func testmanhattan(query theta, count int) ([]theta, []float64) {
+func calculateDistance(query theta, count int) ([]theta, []float64) {
 	thetas := make([]theta, count+1)
 	distances := make([]float64, count+1)
-	db, err := bolt.Open(dbname, 0644, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-	db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("theta"))
+	if confvar.DB {
+		db, err := bolt.Open(dbname, 0644, nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer db.Close()
+		db.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("theta"))
 
-		c := b.Cursor()
-		indexcount := 0
+			c := b.Cursor()
+			indexcount := 0
 
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			newtheta, err := gobDecode(v)
-			if err != nil {
-				fmt.Println("decoding problem")
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				newtheta, err := gobDecode(v)
+				if err != nil {
+					fmt.Println("decoding problem")
+				}
+				if indexcount <= count {
+					thetas[indexcount] = newtheta
+					switch distance {
+					case "jsd":
+						distances[indexcount] = jensenShannon(query.Vector, newtheta.Vector)
+					default:
+						distances[indexcount] = manhattan(query.Vector, newtheta.Vector)
+					}
+					indexcount++
+					continue
+				}
+				maxindex, maxfloat := maxIndexDistance(distances)
+				var newdistance float64
+				switch distance {
+				case "jsd":
+					newdistance = jensenShannon(query.Vector, newtheta.Vector)
+				default:
+					newdistance = manhattan(query.Vector, newtheta.Vector)
+				}
+				if newdistance < maxfloat {
+					thetas[maxindex] = newtheta
+					distances[maxindex] = newdistance
+				}
 			}
+			return nil
+		})
+		sort.Sort(dataframe{Thetas: thetas, Distances: distances})
+		return thetas, distances
+	} else {
+		indexcount := 0
+		for _, v := range backend {
+			newtheta := v
 			if indexcount <= count {
 				thetas[indexcount] = newtheta
 				switch distance {
@@ -697,12 +868,10 @@ func testmanhattan(query theta, count int) ([]theta, []float64) {
 				thetas[maxindex] = newtheta
 				distances[maxindex] = newdistance
 			}
-			indexcount++
 		}
-		return nil
-	})
-	sort.Sort(dataframe{Thetas: thetas, Distances: distances})
-	return thetas, distances
+		sort.Sort(dataframe{Thetas: thetas, Distances: distances})
+		return thetas, distances
+	}
 }
 
 func sortresults(result []float64, number int) []float64 {

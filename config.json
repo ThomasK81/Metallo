@@ -3,6 +3,7 @@
 "port": ":3737",
 "csv_source": "theta.csv",
 "local": true,
+"db": false,
 "significance": 0.1,
 "distance": "jsd"
 }
