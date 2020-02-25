@@ -1,9 +1,10 @@
 {
 "host": "http://localhost:3737",
 "port": ":3737",
-"csv_source": "theta.csv",
+"csv_source": "thetaOGL.csv",
 "local": true,
 "db": false,
 "significance": 0.1,
-"distance": "jsd"
+"distance": "jsd",
+"divMax": 0.03
 }

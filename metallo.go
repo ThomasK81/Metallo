@@ -16,9 +16,11 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/boltdb/bolt"
 	"github.com/gorilla/mux"
@@ -50,6 +52,7 @@ type serverConfig struct {
 	DB           bool    `json:"db"`
 	Significance float64 `json:"significance"`
 	Distance     string  `json:"distance"`
+	DivMax       float64 `json:"divMax"`
 }
 
 var templates = template.Must(template.ParseFiles("tmpl/view.html", "tmpl/index.html"))
@@ -341,14 +344,18 @@ func main() {
 	router := mux.NewRouter().StrictSlash(true)
 	s := http.StripPrefix("/static/", http.FileServer(http.Dir("./static/")))
 	js := http.StripPrefix("/js/", http.FileServer(http.Dir("./js/")))
+	processed := http.StripPrefix("/processed/", http.FileServer(http.Dir("./processed/")))
 	theta := http.StripPrefix("/cex/", http.FileServer(http.Dir("./theta/")))
 	router.PathPrefix("/static/").Handler(s)
 	router.PathPrefix("/js/").Handler(js)
+	router.PathPrefix("/processed/").Handler(processed)
 	router.PathPrefix("/theta/").Handler(theta)
 	// router.HandleFunc("/load/{theta}", LoadDB)
 	router.HandleFunc("/view/{urn}/{count}", ViewPage)
 	router.HandleFunc("/view/{urn}/{count}/json", ViewPageJs)
 	router.HandleFunc("/topic/{topic}/{count}", ViewTopic)
+	router.HandleFunc("/divergenceJS", DivergenceJS)
+	router.HandleFunc("/divergenceCSV", DivergenceCSV)
 	router.HandleFunc("/", Index)
 	log.Println("Listening at" + port + "...")
 	log.Fatal(http.ListenAndServe(port, router))
@@ -388,6 +395,135 @@ func ViewPage(w http.ResponseWriter, r *http.Request) {
 
 	p, _ := loadPage(info, address)
 	renderTemplate(w, "view", p)
+}
+
+func DivergenceJS(w http.ResponseWriter, r *http.Request) {
+	var resultJS []Divergence
+	for i, v := range backend {
+		// resultJS = append(resultJS, Divergence{SourceID: v.ID, TargetID: v.ID, JSDivergence: float64(0)})
+		startIter := i + 1
+		if startIter == len(backend) {
+			break
+		}
+		for j := startIter; j < len(backend); j++ {
+			newfloat := jensenShannon(v.Vector, backend[j].Vector)
+			if newfloat < confvar.DivMax {
+				resultJS = append(resultJS, Divergence{SourceID: v.ID, TargetID: backend[j].ID, JSDivergence: newfloat})
+			}
+		}
+	}
+	resultJSON, _ := json.Marshal(resultJS)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	fmt.Fprintln(w, string(resultJSON))
+}
+
+func DivergenceCSV(w http.ResponseWriter, r *http.Request) {
+	numCPU := runtime.NumCPU() - 1
+	if numCPU == 0 {
+		numCPU = 1
+	}
+	log.Println("metallo is using", numCPU, "cores")
+	var divided []func()
+	chunkSize := (len(backend) + numCPU - 1) / numCPU
+	for i := 0; i < numCPU; i++ {
+		idx := i * chunkSize
+		if i >= numCPU-1 {
+			divided = append(divided, func() {
+				prepareCSVs(backend[idx:], idx)
+			})
+		} else {
+			end := i*chunkSize + chunkSize + 1
+			divided = append(divided, func() {
+				prepareCSVs(backend[idx:end], idx)
+			})
+		}
+	}
+	Parallelize(divided...)
+	fmt.Fprintln(w, "all results produced.")
+}
+
+func testPar(temptheta []theta) {
+	log.Println(temptheta[0].ID, temptheta[len(temptheta)-1].ID)
+}
+
+func prepareCSVs(temptheta []theta, startInd int) {
+	resultCSV := []Divergence{}
+	csvlength := len(backend) * 20
+	mcount := 0
+	count := 0
+	index := startInd
+	startString := fmt.Sprintf("fromRow%dCol%dTo", startInd+1, 1)
+	endString := ""
+	for i, v := range temptheta {
+		startIter := i + 1
+		if startIter >= len(temptheta) {
+			break
+		}
+		for j := startInd + 1; j < len(backend); j++ {
+			mcount++
+			if mcount%len(backend) == 0 {
+				log.Println("Process with startInd", startInd, "processed", startIter, "batch(es)")
+			}
+			if v.ID == backend[j].ID {
+				continue
+			}
+			newfloat := jensenShannon(v.Vector, backend[j].Vector)
+			if newfloat < confvar.DivMax {
+				resultCSV = append(resultCSV, Divergence{SourceID: v.ID, TargetID: backend[j].ID, JSDivergence: newfloat})
+				count++
+				if count >= csvlength {
+					filename := strings.Join([]string{startString, fmt.Sprintf("Row%dCol%d.csv", index+i+1, j+1)}, "")
+					err := writeCSV(resultCSV, filename)
+					check(err)
+					resultCSV = []Divergence{}
+					count = 0
+					startString = fmt.Sprintf("fromRow%dCol%dTo", index+i+1, j+1)
+				}
+			}
+		}
+		endString = fmt.Sprintf("Row%dEnd.csv", index+i+1)
+	}
+	log.Println("written from start index:", startInd)
+	err := writeCSV(resultCSV, fmt.Sprint(startString, endString))
+	check(err)
+}
+
+// Parallelize parallelizes the function calls
+func Parallelize(functions ...func()) {
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(len(functions))
+
+	defer waitGroup.Wait()
+
+	for _, function := range functions {
+		go func(copy func()) {
+			defer waitGroup.Done()
+			copy()
+		}(function)
+	}
+}
+
+func writeCSV(data []Divergence, filename string) error {
+	filepath := strings.Join([]string{"./processed/", filename}, "")
+	csvFile, err := os.Create(filepath)
+	if err != nil {
+		return err
+	}
+	defer csvFile.Close()
+	writer := csv.NewWriter(csvFile)
+	defer writer.Flush()
+	err = writer.Write([]string{"Source", "Target", "JSD"})
+	if err != nil {
+		return err
+	}
+	for _, v := range data {
+		line := []string{v.SourceID, v.TargetID, fmt.Sprintf("%.6f", v.JSDivergence)}
+		err = writer.Write(line)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ViewPageJs(w http.ResponseWriter, r *http.Request) {
@@ -726,7 +862,6 @@ func jensenShannon(x, y []float64) float64 {
 	for i, v := range x {
 		m := 0.5 * (v + y[i])
 		if v != 0 {
-			// add kl from p to m
 			result += 0.5 * v * (math.Log(v) - math.Log(m))
 		}
 		if y[i] != 0 {
