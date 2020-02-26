@@ -8,3 +8,4 @@ Thumbs.db
 *.CSV
 *.tsv
 *.TSV
+!theta/thetaExample.csv

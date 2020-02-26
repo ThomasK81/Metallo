@@ -16,6 +16,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -51,13 +52,16 @@ type serverConfig struct {
 	Local        bool    `json:"local"`
 	DB           bool    `json:"db"`
 	Significance float64 `json:"significance"`
+	DimWeight	float64 `json:"dimWeight"`
+	VizWeight	float64 `json:"vizWeight"`
 	Distance     string  `json:"distance"`
 	DivMax       float64 `json:"divMax"`
+	FileLimit	int `json:"fileLimit"`
 }
 
-var templates = template.Must(template.ParseFiles("tmpl/view.html", "tmpl/index.html"))
+var templates = template.Must(template.ParseFiles(filepath.Join("tmpl", "view.html"), filepath.Join("tmpl", "index.html")))
 
-var confvar = loadConfiguration("./config.json")
+var confvar = loadConfiguration("config.json")
 var topics = []string{}
 var backend = []theta{}
 var significant = confvar.Significance
@@ -65,7 +69,7 @@ var port = confvar.Port
 var address = confvar.Host
 var distance = confvar.Distance
 var pwd, _ = os.Getwd()
-var dbname = pwd + "/metallo.db"
+var dbname = filepath.Join(pwd, "metallo.db")
 var distnorm float64
 
 func retrieveTopics() (topics []string) {
@@ -148,11 +152,12 @@ func thetaToDB(thetafile theta) error {
 
 func readThetaNoDB() (result []theta, topics []string) {
 	file := confvar.Source
-	fmt.Println("Reading file.")
+	log.Println("Reading file.")
 	switch confvar.Local {
 	case false:
-		fmt.Println("Fetching external resource.")
-		data, _ := getContent(file)
+		log.Println("Fetching external resource.")
+		data, err := getContent(file)
+		check(err)
 		str := string(data)
 		reader := csv.NewReader(strings.NewReader(str))
 		reader.LazyQuotes = true
@@ -181,12 +186,12 @@ func readThetaNoDB() (result []theta, topics []string) {
 			}
 			result = append(result, theta{ID: identifier, Text: text, Vector: vector})
 		}
-		fmt.Println("All is read.")
+		log.Println("All is read.")
 	case true:
-		fmt.Println("Fetching internal resource.")
+		log.Println("Fetching internal resource.")
 		f, err := os.Open(file)
 		if err != nil {
-			fmt.Println("could not open file")
+			log.Println("could not open file")
 		}
 		defer f.Close()
 		reader := csv.NewReader(bufio.NewReader(f))
@@ -221,7 +226,8 @@ func readThetaNoDB() (result []theta, topics []string) {
 			recordcount++
 			fmt.Printf("\rWrote %d records to memory.", recordcount)
 		}
-		fmt.Println("All is read and written.")
+		fmt.Println()
+		log.Println("All is read and written.")
 	}
 	return result, topics
 }
@@ -229,11 +235,11 @@ func readThetaNoDB() (result []theta, topics []string) {
 func readTheta() []string {
 	os.Remove(dbname)
 	file := confvar.Source
-	fmt.Println("Reading file.")
+	log.Println("Reading file.")
 	var topics []string
 	switch confvar.Local {
 	case false:
-		fmt.Println("Fetching external resource.")
+		log.Println("Fetching external resource.")
 		data, _ := getContent(file)
 		str := string(data)
 		reader := csv.NewReader(strings.NewReader(str))
@@ -263,12 +269,12 @@ func readTheta() []string {
 			}
 			thetaToDB(theta{ID: identifier, Text: text, Vector: vector})
 		}
-		fmt.Println("All is read.")
+		log.Println("All is read.")
 	case true:
-		fmt.Println("Fetching internal resource.")
+		log.Println("Fetching internal resource.")
 		f, err := os.Open(file)
 		if err != nil {
-			fmt.Println("could not open file")
+			log.Println("could not open file")
 		}
 		defer f.Close()
 		reader := csv.NewReader(bufio.NewReader(f))
@@ -303,7 +309,8 @@ func readTheta() []string {
 			recordcount++
 			fmt.Printf("\rWrote %d records to the database.", recordcount)
 		}
-		fmt.Println("All is read and written.")
+		fmt.Println()
+		log.Println("All is read and written.")
 	}
 
 	dbkey := []byte("topics")
@@ -331,26 +338,27 @@ func main() {
 	flag.Parse()
 	if confvar.DB {
 		if *loadDB {
-			fmt.Println("(Re-)building the db...")
+			log.Println("(Re-)building the db...")
 			topics = readTheta()
 		} else {
-			fmt.Println("Starting without re-building the db...")
+			log.Println("Starting without re-building the db...")
 			topics = retrieveTopics()
 		}
 	} else {
-		fmt.Println("Starting without a database. Keeping it all in memory...")
+		log.Println("Starting without a database. Keeping it all in memory...")
 		backend, topics = readThetaNoDB()
 	}
 	router := mux.NewRouter().StrictSlash(true)
-	s := http.StripPrefix("/static/", http.FileServer(http.Dir("./static/")))
-	js := http.StripPrefix("/js/", http.FileServer(http.Dir("./js/")))
-	processed := http.StripPrefix("/processed/", http.FileServer(http.Dir("./processed/")))
-	theta := http.StripPrefix("/cex/", http.FileServer(http.Dir("./theta/")))
+	s := http.StripPrefix("/static/", http.FileServer(http.Dir("static")))
+	js := http.StripPrefix("/js/", http.FileServer(http.Dir("js")))
+	processed := http.StripPrefix("/processed/", http.FileServer(http.Dir("processed")))
+	theta := http.StripPrefix("/theta/", http.FileServer(http.Dir("theta")))
+	ldavis := http.StripPrefix("/ldavis/", http.FileServer(http.Dir("ldavis")))
 	router.PathPrefix("/static/").Handler(s)
 	router.PathPrefix("/js/").Handler(js)
 	router.PathPrefix("/processed/").Handler(processed)
 	router.PathPrefix("/theta/").Handler(theta)
-	// router.HandleFunc("/load/{theta}", LoadDB)
+	router.PathPrefix("/ldavis/").Handler(ldavis)
 	router.HandleFunc("/view/{urn}/{count}", ViewPage)
 	router.HandleFunc("/view/{urn}/{count}/json", ViewPageJs)
 	router.HandleFunc("/topic/{topic}/{count}", ViewTopic)
@@ -366,7 +374,7 @@ func loadConfiguration(file string) serverConfig {
 	configFile, err := os.Open(file)
 	defer configFile.Close()
 	if err != nil {
-		fmt.Println(err.Error())
+		log.Println(err.Error())
 	}
 	jsonParser := json.NewDecoder(configFile)
 	jsonParser.Decode(&config)
@@ -438,6 +446,8 @@ func DivergenceCSV(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+	err := writeIDMap("mapID.csv")
+	check(err)
 	Parallelize(divided...)
 	fmt.Fprintln(w, "all results produced.")
 }
@@ -448,7 +458,7 @@ func testPar(temptheta []theta) {
 
 func prepareCSVs(temptheta []theta, startInd int) {
 	resultCSV := []Divergence{}
-	csvlength := len(backend) * 20
+	csvlength := len(backend) * confvar.FileLimit
 	mcount := 0
 	count := 0
 	index := startInd
@@ -469,7 +479,9 @@ func prepareCSVs(temptheta []theta, startInd int) {
 			}
 			newfloat := jensenShannon(v.Vector, backend[j].Vector)
 			if newfloat < confvar.DivMax {
-				resultCSV = append(resultCSV, Divergence{SourceID: v.ID, TargetID: backend[j].ID, JSDivergence: newfloat})
+				resultCSV = append(resultCSV, Divergence{SourceID: strconv.Itoa(startInd + startIter), 
+					TargetID: strconv.Itoa(j + 1), 
+					JSDivergence: newfloat})
 				count++
 				if count >= csvlength {
 					filename := strings.Join([]string{startString, fmt.Sprintf("Row%dCol%d.csv", index+i+1, j+1)}, "")
@@ -503,9 +515,32 @@ func Parallelize(functions ...func()) {
 	}
 }
 
+func writeIDMap(filename string) error {
+	fp := filepath.Join("processed", filename)
+	csvFile, err := os.Create(fp)
+	if err != nil {
+		return err
+	}
+	defer csvFile.Close()
+	writer := csv.NewWriter(csvFile)
+	defer writer.Flush()
+	err = writer.Write([]string{"MetalloID", "OriginalID"})
+	if err != nil {
+		return err
+	}
+	for i, v := range backend {
+		line := []string{strconv.Itoa(i + 1), v.ID}
+		err = writer.Write(line)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func writeCSV(data []Divergence, filename string) error {
-	filepath := strings.Join([]string{"./processed/", filename}, "")
-	csvFile, err := os.Create(filepath)
+	fp := filepath.Join("processed", filename)
+	csvFile, err := os.Create(fp)
 	if err != nil {
 		return err
 	}
@@ -612,7 +647,7 @@ func ViewTopic(w http.ResponseWriter, r *http.Request) {
 		}
 		maxindex, maxfloat := maxIndexTheta(resultsorted)
 		percentage := "Topic" + vars["topic"] + ": "
-		percfloat := maxfloat * 100
+		percfloat := maxfloat * confvar.DimWeight
 		strnumber := strconv.FormatFloat(percfloat, 'f', 3, 64)
 		percentage = percentage + strnumber + " percent"
 		resultstring2 := strings.Join([]string{resultstring1, resultsorted[maxindex].ID, percentage, resultsorted[maxindex].Text}, "\n")
@@ -682,7 +717,7 @@ func loadPage(info Info, address string) (*Page, error) {
 			sortedIndiresult := reversesortresults(thetas[i].Vector, 3)
 			for j := range sortedIndiresult {
 				indiIndex := sortedIndiresult[j]
-				normed := thetas[i].Vector[indiIndex] * 100
+				normed := thetas[i].Vector[indiIndex] * confvar.DimWeight
 				if normed > 5 {
 					beststring := "Topic" + strconv.Itoa(indiIndex+1) + " " + topics[indiIndex] + ": " + strconv.FormatFloat(normed, 'f', 2, 64) + "%" + "</br>"
 					best = best + beststring
@@ -694,7 +729,7 @@ func loadPage(info Info, address string) (*Page, error) {
 			bests = append(bests, best)
 			resultNetwork.Nodes = append(resultNetwork.Nodes, Node{ID: urn, Label: urn, X: float64(1), Y: float64(1), Size: float64(1)})
 		case i > 0:
-			mannormed := distances[i] * 100
+			mannormed := distances[i]
 			mandist := strconv.FormatFloat(mannormed, 'f', 2, 64)
 			texts = append(texts, thetas[i].Text)
 			ids = append(ids, thetas[i].ID)
@@ -702,7 +737,7 @@ func loadPage(info Info, address string) (*Page, error) {
 			sortedIndiresult := reversesortresults(thetas[i].Vector, 3)
 			for j := range sortedIndiresult {
 				indiIndex := sortedIndiresult[j]
-				normed := thetas[i].Vector[indiIndex] * 100
+				normed := thetas[i].Vector[indiIndex] * confvar.DimWeight
 				if normed > 5 {
 					beststring := "Topic" + strconv.Itoa(indiIndex+1) + " " + topics[indiIndex] + ": " + strconv.FormatFloat(normed, 'f', 2, 64) + "%" + "</br>"
 					thebest = thebest + beststring
@@ -711,15 +746,15 @@ func loadPage(info Info, address string) (*Page, error) {
 			for j := range thetas[i].Vector {
 				topicdistance := mpair(thetas[i].Vector[j], query.Vector[j])
 				if topicdistance > significant {
-					topicdistance = topicdistance * 100
+					topicdistance = topicdistance * confvar.DimWeight
 					signistring := "Distance Topic to " + strconv.Itoa(j+1) + " " + topics[j] + ": " + strconv.FormatFloat(topicdistance, 'f', 2, 64) + "%" + "</br>"
 					signi = signi + signistring
 				}
 			}
 			signis = append(signis, signi)
 			bests = append(bests, thebest)
-			xcord := float64(1) + float64(1)*distances[i]*10
-			ycord := float64(1) + float64(-1)*distances[i]*10
+			xcord := float64(1) + float64(1)*distances[i] * confvar.VizWeight
+			ycord := float64(1) + float64(-1)*distances[i] * confvar.VizWeight
 			var size float64
 			size = float64(1) * (float64(1) - distances[i])
 			resultNetwork.Nodes = append(resultNetwork.Nodes, Node{ID: thetas[i].ID, Label: thetas[i].ID, X: xcord, Y: ycord, Size: size})
@@ -782,7 +817,7 @@ func JsonResponse(info Info) (PassageJsonResponse, error) {
 			manhattans = append(manhattans, "0")
 			text = thetas[i].Text
 		case i > 0:
-			mannormed := distances[i] * 100
+			mannormed := distances[i]
 			mandist := strconv.FormatFloat(mannormed, 'f', 2, 64)
 			ids = append(ids, thetas[i].ID)
 			manhattans = append(manhattans, mandist)
@@ -946,7 +981,7 @@ func calculateDistance(query theta, count int) ([]theta, []float64) {
 			for k, v := c.First(); k != nil; k, v = c.Next() {
 				newtheta, err := gobDecode(v)
 				if err != nil {
-					fmt.Println("decoding problem")
+					log.Println("decoding problem")
 				}
 				if indexcount <= count {
 					thetas[indexcount] = newtheta
