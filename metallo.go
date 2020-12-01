@@ -33,6 +33,17 @@ type theta struct {
 	Vector []float64
 }
 
+type topicvalue struct {
+	Topic int     `json:"topic"`
+	Value float64 `json:"value"`
+}
+
+type ByValue []topicvalue
+
+func (a ByValue) Len() int           { return len(a) }
+func (a ByValue) Less(i, j int) bool { return a[i].Value > a[j].Value }
+func (a ByValue) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+
 type ptopic struct {
 	ID    string
 	Text  string
@@ -52,16 +63,17 @@ type serverConfig struct {
 	Local        bool    `json:"local"`
 	DB           bool    `json:"db"`
 	Significance float64 `json:"significance"`
-	DimWeight	float64 `json:"dimWeight"`
-	VizWeight	float64 `json:"vizWeight"`
+	DimWeight    float64 `json:"dimWeight"`
+	VizWeight    float64 `json:"vizWeight"`
 	Distance     string  `json:"distance"`
 	DivMax       float64 `json:"divMax"`
-	FileLimit	int `json:"fileLimit"`
+	FileLimit    int     `json:"fileLimit"`
 }
 
-var templates = template.Must(template.ParseFiles(filepath.Join("tmpl", "view.html"), filepath.Join("tmpl", "index.html")))
+var baseDir = getBaseDirectory()
+var templates = template.Must(template.ParseFiles(filepath.Join(baseDir, "tmpl", "view.html"), filepath.Join(baseDir, "tmpl", "index.html")))
 
-var confvar = loadConfiguration("config.json")
+var confvar = loadConfiguration(filepath.Join(baseDir, "config.json"))
 var topics = []string{}
 var backend = []theta{}
 var significant = confvar.Significance
@@ -69,8 +81,16 @@ var port = confvar.Port
 var address = confvar.Host
 var distance = confvar.Distance
 var pwd, _ = os.Getwd()
-var dbname = filepath.Join(pwd, "metallo.db")
+var dbname = filepath.Join(baseDir, pwd, "metallo.db")
 var distnorm float64
+
+func getBaseDirectory() string {
+	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+	if err != nil {
+		log.Fatal(err)
+	}
+	return dir
+}
 
 func retrieveTopics() (topics []string) {
 	db, err := bolt.Open(dbname, 0644, nil)
@@ -151,7 +171,7 @@ func thetaToDB(thetafile theta) error {
 }
 
 func readThetaNoDB() (result []theta, topics []string) {
-	file := confvar.Source
+	file := filepath.Join(baseDir, confvar.Source)
 	log.Println("Reading file.")
 	switch confvar.Local {
 	case false:
@@ -479,8 +499,8 @@ func prepareCSVs(temptheta []theta, startInd int) {
 			}
 			newfloat := jensenShannon(v.Vector, backend[j].Vector)
 			if newfloat < confvar.DivMax {
-				resultCSV = append(resultCSV, Divergence{SourceID: strconv.Itoa(startInd + startIter), 
-					TargetID: strconv.Itoa(j + 1), 
+				resultCSV = append(resultCSV, Divergence{SourceID: strconv.Itoa(startInd + startIter),
+					TargetID:     strconv.Itoa(j + 1),
 					JSDivergence: newfloat})
 				count++
 				if count >= csvlength {
@@ -516,7 +536,7 @@ func Parallelize(functions ...func()) {
 }
 
 func writeIDMap(filename string) error {
-	fp := filepath.Join("processed", filename)
+	fp := filepath.Join(baseDir, "processed", filename)
 	csvFile, err := os.Create(fp)
 	if err != nil {
 		return err
@@ -539,7 +559,7 @@ func writeIDMap(filename string) error {
 }
 
 func writeCSV(data []Divergence, filename string) error {
-	fp := filepath.Join("processed", filename)
+	fp := filepath.Join(baseDir, "processed", filename)
 	csvFile, err := os.Create(fp)
 	if err != nil {
 		return err
@@ -753,8 +773,8 @@ func loadPage(info Info, address string) (*Page, error) {
 			}
 			signis = append(signis, signi)
 			bests = append(bests, thebest)
-			xcord := float64(1) + float64(1)*distances[i] * confvar.VizWeight
-			ycord := float64(1) + float64(-1)*distances[i] * confvar.VizWeight
+			xcord := float64(1) + float64(1)*distances[i]*confvar.VizWeight
+			ycord := float64(1) + float64(-1)*distances[i]*confvar.VizWeight
 			var size float64
 			size = float64(1) * (float64(1) - distances[i])
 			resultNetwork.Nodes = append(resultNetwork.Nodes, Node{ID: thetas[i].ID, Label: thetas[i].ID, X: xcord, Y: ycord, Size: size})
@@ -825,11 +845,19 @@ func JsonResponse(info Info) (PassageJsonResponse, error) {
 	}
 
 	relatedItems := []relatedItem{}
-	for i := range ids {
-		relatedItems = append(relatedItems, relatedItem{Id: ids[i], Distance: manhattans[i]})
+	for i, v := range ids {
+		if v != urn {
+			relatedItems = append(relatedItems, relatedItem{Id: ids[i], Distance: manhattans[i]})
+		}
 	}
 
-	passageObject := PassageJsonResponse{URN: "test", Text: text, Items: relatedItems}
+	tv := []topicvalue{}
+
+	for i, v := range query.Vector {
+		tv = append(tv, topicvalue{Topic: i + 1, Value: v})
+	}
+	sort.Sort(ByValue(tv))
+	passageObject := PassageJsonResponse{URN: urn, Text: text, TopTopics: tv[0:5], Items: relatedItems}
 	return passageObject, nil
 }
 
@@ -1113,10 +1141,12 @@ func getContent(url string) ([]byte, error) {
 }
 
 type PassageJsonResponse struct {
-	URN   string        `json:"urn"`
-	Text  string        `json:"text"`
-	Items []relatedItem `json:"items"`
+	URN       string        `json:"urn"`
+	Text      string        `json:"text"`
+	TopTopics []topicvalue  `json:"topTopics"`
+	Items     []relatedItem `json:"items"`
 }
+
 type relatedItem struct {
 	Id       string `json:"id"`
 	Distance string `json:"distance"`
